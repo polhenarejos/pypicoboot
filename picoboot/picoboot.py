@@ -123,6 +123,8 @@ class PicoBoot:
         self.ep_in = ep_in
         self._token_counter = itertools.count(1)
         self.interface_reset()
+        self._memory = self._guess_flash_size()
+        self._model = self._determine_model()
 
     @classmethod
     def open(cls, vid: int = DEFAULT_VID, pid: list[int] = [DEFAULT_PID_RP2040, DEFAULT_PID_RP2350], serial: Optional[str] = None) -> "PicoBoot":
@@ -137,7 +139,7 @@ class PicoBoot:
         devices = usb.core.find(find_all=True, custom_match=find_pids(pid))
         devices = list(devices) if devices is not None else []
         if not devices:
-            raise PicoBootError("No RP2350 device found in PICOBOOT mode")
+            raise PicoBootError("No device found in PICOBOOT mode")
 
         dev = None
         if serial is None:
@@ -321,23 +323,30 @@ class PicoBoot:
     def exclusive_access(self) -> None:
         self._send_command(CommandID.EXCLUSIVE_ACCESS, args=struct.pack("<B", 1), transfer_length=0)
 
-    def determine_model(self) -> str:
+    def _determine_model(self) -> str:
+        if (hasattr(self, "_model")) and (self._model is not None):
+            return self._model
         data = self.flash_read(Addresses.BOOTROM_MAGIC, 4)
         (magic,) = struct.unpack("<I", data)
         return Model(magic & 0xf0ffffff)
 
-    def guess_flash_size(self) -> Optional[int]:
+    @property
+    def model(self) -> str:
+        return self._model
+
+    def _guess_flash_size(self) -> int:
+        if (hasattr(self, "_memory")) and (self._memory is not None):
+            return self._memory
         FLASH_BASE = 0x10000000
         PAGE_SIZE = 256
 
-        self.interface_reset()
         self.exclusive_access()
+        self.exit_xip()
 
         pages = self.flash_read(FLASH_BASE, 2 * PAGE_SIZE)
 
         if pages[:PAGE_SIZE] == pages[PAGE_SIZE:]:
             if (pages[:PAGE_SIZE] == b'\xFF' * PAGE_SIZE):
-                print("Flash appears to be erased")
                 self.flash_write(FLASH_BASE, b'\x50\x49\x43\x4F' + b'\xFF' * (PAGE_SIZE - 4))
                 return self.guess_flash_size()
 
@@ -359,6 +368,9 @@ class PicoBoot:
 
         return candidates[-1]
 
+    @property
+    def memory(self) -> int:
+        return self._memory
 
     def get_info(self, info_type: InfoType, param0: int = 0, max_len: int = 32) -> bytes:
         args = struct.pack("<IIII", info_type, param0, 0, 0)
