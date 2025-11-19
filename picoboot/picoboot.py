@@ -1,0 +1,457 @@
+# picoboot.py
+from binascii import hexlify
+from typing import Optional
+import usb.core
+import usb.util
+import struct
+import itertools
+from picoboot.core.enums import NamedIntEnum
+from picoboot.utils import uint_to_int
+
+# Valors per defecte segons el datasheet (es poden canviar via OTP) :contentReference[oaicite:4]{index=4}
+DEFAULT_VID = 0x2E8A
+DEFAULT_PID_RP2040 = 0x0003
+DEFAULT_PID_RP2350 = 0x000F
+
+PICOBOOT_MAGIC = 0x431FD10B
+
+# Bit 7 = direcció de transferència de dades (IN si està posat) :contentReference[oaicite:5]{index=5}
+CMD_DIR_IN = 0x80
+
+# IDs de comanda (secció 5.6.4) :contentReference[oaicite:6]{index=6}
+class CommandID(NamedIntEnum):
+    EXCLUSIVE_ACCESS = 0x01
+    FLASH_ERASE      = 0x03
+    READ             = 0x84
+    WRITE            = 0x05
+    EXIT_XIP         = 0x06
+    ENTER_XIP        = 0x07
+    REBOOT2          = 0x0A
+    GET_INFO         = 0x8B
+    OTP_READ         = 0x8C
+    OTP_WRITE        = 0x0D
+
+# Control requests (secció 5.6.5) :contentReference[oaicite:7]{index=7}
+class ControlRequest(NamedIntEnum):
+    REQ_INTERFACE_RESET    = 0x41
+    REQ_GET_COMMAND_STATUS = 0x42
+    BMREQ_RESET            = 0x41  # Host->Device, Class, Interface
+    BMREQ_GET_STATUS       = 0xC1  # Device->Host, Class, Interface
+
+class InfoType(NamedIntEnum):
+    SYS                    = 0x01
+    PARTITION              = 0x02
+    UF2_TARGET_PARTITION   = 0x03
+    UF2_STATUS             = 0x04
+
+class SysInfoFlags(NamedIntEnum):
+    CHIP_INFO        = 0x01
+    CRITICAL         = 0x02
+    CPU              = 0x04
+    FLASH            = 0x08
+    BOOT_RANDOM      = 0x10
+    NONCE            = 0x20
+    BOOT_INFO        = 0x40
+
+class CriticalRegister(NamedIntEnum):
+    SECURE_BOOT             = 0x01
+    SECURE_DEBUG_DISABLE    = 0x02
+    DEBUG_DISABLE           = 0x04
+    DEFAULT_ARCHSEL         = 0x08
+    GLITCH_DETECTOR_ENABLE  = 0x10
+    GLITCH_DETECTOR_SENS    = 0x60
+    ARM_DISABLE             = 0x10000
+    RISCV_DISABLE           = 0x20000
+
+class DiagnosticPartition(NamedIntEnum):
+    REGION_SEARCHED                         = 0x01
+    INVALID_BLOCK_LOOPS                     = 0x02
+    VALID_BLOCK_LOOPS                       = 0x04
+    VALID_IMAGE_DEFAULTS                    = 0x08
+    HAS_PARTITION_TABLE                     = 0x10
+    CONSIDERED                              = 0x20
+    CHOSEN                                  = 0x40
+    PARTITION_TABLE_MATCHING_KEY_FOR_VERIFY = 0x80
+    PARTITION_TABLE_HASH_FOR_VERIFY         = 0x100
+    PARTITION_TABLE_VERIFIED_OK             = 0x200
+    IMAGE_DEF_MATCHING_KEY_FOR_VERIFY       = 0x400
+    IMAGE_DEF_HASH_FOR_VERIFY               = 0x800
+    IMAGE_DEF_VERIFIED_OK                   = 0x1000
+    LOAD_MAP_ENTRIES_LOADED                 = 0x2000
+    IMAGE_LAUNCHED                          = 0x4000
+    IMAGE_CONDITION_FAILURES                = 0x8000
+
+class PartitionInfoType(NamedIntEnum):
+    PARTITION_0       = 0
+    PARTITION_1       = 1
+    PARTITION_2       = 2
+    PARTITION_3       = 3
+    PARTITION_4       = 4
+    PARTITION_5       = 5
+    PARTITION_6       = 6
+    PARTITION_7       = 7
+    PARTITION_8       = 8
+    PARTITION_9       = 9
+    PARTITION_10      = 10
+    PARTITION_11      = 11
+    PARTITION_12      = 12
+    PARTITION_13      = 13
+    PARTITION_14      = 14
+    PARTITION_15      = 15
+    NONE              = -1
+    SLOT_0            = -2
+    SLOT_1            = -3
+    IMAGE            = -4
+
+class Model(NamedIntEnum):
+    RP2040  = 0x01754d
+    RP2350  = 0x02754d
+    UNKNOWN = 0x000000
+
+class Addresses(NamedIntEnum):
+    BOOTROM_MAGIC = 0x00000010
+
+class PicoBootError(Exception):
+    pass
+
+class PicoBoot:
+
+    def __init__(self, dev: usb.core.Device, intf, ep_out, ep_in) -> None:
+        self.dev = dev
+        self.intf = intf
+        self.ep_out = ep_out
+        self.ep_in = ep_in
+        self._token_counter = itertools.count(1)
+        self.interface_reset()
+
+    @classmethod
+    def open(cls, vid: int = DEFAULT_VID, pid: list[int] = [DEFAULT_PID_RP2040, DEFAULT_PID_RP2350], serial: Optional[str] = None) -> "PicoBoot":
+        class find_pids(object):
+            def __init__(self, pids):
+                self._pids = pids
+            def __call__(self, device):
+                if device.idProduct in self._pids:
+                    return True
+                return False
+
+        devices = usb.core.find(find_all=True, custom_match=find_pids(pid))
+        devices = list(devices) if devices is not None else []
+        if not devices:
+            raise PicoBootError("No RP2350 device found in PICOBOOT mode")
+
+        dev = None
+        if serial is None:
+            dev = devices[0]
+        else:
+            for d in devices:
+                try:
+                    s = usb.util.get_string(d, d.iSerialNumber)
+                except usb.core.USBError:
+                    continue
+                if s == serial:
+                    dev = d
+                    break
+        if dev is None:
+            raise PicoBootError("No device found with this serial number")
+
+        # Ensure active configuration
+        # macOS does not allow detach_kernel_driver, and often returns Access Denied
+        try:
+            if dev.is_kernel_driver_active(0):
+                dev.detach_kernel_driver(0)
+        except usb.core.USBError:
+            # If it fails, we continue anyway. It's normal on macOS.
+            pass
+        except NotImplementedError:
+            # Also fine on backends that don't implement the function
+            pass
+
+        dev.set_configuration()
+        cfg = dev.get_active_configuration()
+
+        intf = None
+        for i in cfg:
+            if i.bInterfaceClass == 0xFF and i.bInterfaceSubClass == 0 and i.bInterfaceProtocol == 0:
+                intf = i
+                break
+        if intf is None:
+            raise PicoBootError("No interface found with PICOBOOT at the device")
+
+        #usb.util.claim_interface(dev, intf.bInterfaceNumber)
+
+        ep_in = ep_out = None
+        for ep in intf.endpoints():
+            if usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_IN:
+                ep_in = ep
+            else:
+                ep_out = ep
+
+        if ep_in is None or ep_out is None:
+            raise PicoBootError("No PICOBOOT BULK_IN/BULK_OUT endpoints found")
+
+        return cls(dev, intf, ep_out, ep_in)
+
+    def interface_reset(self) -> None:
+        self.dev.ctrl_transfer(
+            ControlRequest.BMREQ_RESET,
+            ControlRequest.REQ_INTERFACE_RESET,
+            0,
+            self.intf.bInterfaceNumber,
+            None
+        )
+
+    def get_command_status(self) -> dict:
+        data = self.dev.ctrl_transfer(
+            ControlRequest.BMREQ_GET_STATUS,
+            ControlRequest.REQ_GET_COMMAND_STATUS,
+            0,
+            self.intf.bInterfaceNumber,
+            16,
+        )
+        b = bytes(data)
+        dToken, dStatusCode = struct.unpack_from("<II", b, 0)
+        bCmdId = b[8]
+        bInProgress = b[9]
+        return {
+            "token": dToken,
+            "status": dStatusCode,
+            "cmd_id": bCmdId,
+            "in_progress": bool(bInProgress),
+        }
+
+    def _next_token(self) -> int:
+        return next(self._token_counter) & 0xFFFFFFFF
+
+    def _build_command(self, cmd_id: CommandID, args: bytes = b"", transfer_length: int = 0, token: Optional[int] = None) -> tuple[int, bytes]:
+        if token is None:
+            token = self._next_token()
+        if len(args) > 16:
+            raise ValueError("Too many args: maximum 16 bytes")
+        bCmdSize = len(args)
+        args = args.ljust(16, b"\x00")
+        header = struct.pack(
+            "<I I B B H I 16s",
+            PICOBOOT_MAGIC,
+            token,
+            cmd_id & 0xFF,
+            bCmdSize & 0xFF,
+            0,                      # reserved
+            transfer_length & 0xFFFFFFFF,
+            args,
+        )
+        return token, header
+
+    def _send_command(
+        self,
+        cmd_id: CommandID,
+        args: bytes = b"",
+        data_out: bytes | None = None,
+        transfer_length: int | None = None,
+        timeout: int = 3000,
+    ) -> bytes:
+        is_in = bool(cmd_id & CMD_DIR_IN)
+
+        if transfer_length is None:
+            transfer_length = 0 if data_out is None else len(data_out)
+
+        token, header = self._build_command(cmd_id, args=args, transfer_length=transfer_length)
+        print(f"Sending command {cmd_id} (0x{cmd_id:02X}) with token {token} (0x{token:08X}) and transfer_length {transfer_length}")
+
+        self.ep_out.write(header, timeout=timeout)
+
+        data_in = b""
+
+        if transfer_length:
+            if is_in:
+                remaining = transfer_length
+                chunks = []
+                maxpkt = self.ep_in.wMaxPacketSize
+                while remaining > 0:
+                    chunk = bytes(self.ep_in.read(min(maxpkt, remaining), timeout=timeout))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    remaining -= len(chunk)
+                data_in = b"".join(chunks)
+                if len(data_in) != transfer_length:
+                    raise PicoBootError(f"Expected {transfer_length} bytes, got {len(data_in)}")
+            else:
+                if data_out is None or len(data_out) < transfer_length:
+                    raise ValueError("data_out missing or too short for OUT command")
+                self.ep_out.write(data_out[:transfer_length], timeout=timeout)
+
+        try:
+            if is_in:
+                self.ep_out.write(b"", timeout=timeout)
+            else:
+                ack = self.ep_in.read(1, timeout=timeout)
+        except usb.core.USBError:
+            raise PicoBootError("No ACK received after command")
+
+        return data_in
+
+
+    def flash_erase(self, addr: int, size: int):
+        if addr % 4096 != 0 or size % 4096 != 0:
+            raise ValueError("addr i size must be aligned to 4kB")
+        args = struct.pack("<II", addr, size)
+        self._send_command(CommandID.FLASH_ERASE, args=args, transfer_length=0)
+
+    def flash_read(self, addr: int, size: int) -> bytes:
+        args = struct.pack("<II", addr, size)
+        data = self._send_command(CommandID.READ, args=args, transfer_length=size)
+        if len(data) != size:
+            raise PicoBootError(f"READ returned {len(data)} bytes, expected {size}")
+        return data
+
+    def flash_write(self, addr: int, data: bytes) -> None:
+        if addr % 256 != 0 or len(data) % 256 != 0:
+            raise ValueError("addr i len(data) must be aligned/multiple of 256 bytes")
+        args = struct.pack("<II", addr, len(data))
+        self._send_command(CommandID.WRITE, args=args, data_out=data, transfer_length=len(data))
+
+    def reboot2(self, flags: int = 0, delay_ms: int = 0, p0: int = 0, p1: int = 0) -> int:
+        args = struct.pack("<IIII", flags, delay_ms, p0, p1)
+        token, _ = self._send_command(CommandID.REBOOT2, args=args, transfer_length=0)
+        return token
+
+    def exit_xip(self) -> None:
+        self._send_command(CommandID.EXIT_XIP, transfer_length=0)
+
+    def exclusive_access(self) -> None:
+        self._send_command(CommandID.EXCLUSIVE_ACCESS, args=struct.pack("<B", 1), transfer_length=0)
+
+    def determine_model(self) -> str:
+        data = self.flash_read(Addresses.BOOTROM_MAGIC, 4)
+        (magic,) = struct.unpack("<I", data)
+        return Model(magic & 0xf0ffffff)
+
+    def guess_flash_size(self) -> Optional[int]:
+        FLASH_BASE = 0x10000000
+        PAGE_SIZE = 256
+
+        self.interface_reset()
+        self.exclusive_access()
+
+        pages = self.flash_read(FLASH_BASE, 2 * PAGE_SIZE)
+
+        if pages[:PAGE_SIZE] == pages[PAGE_SIZE:]:
+            if (pages[:PAGE_SIZE] == b'\xFF' * PAGE_SIZE):
+                print("Flash appears to be erased")
+                self.flash_write(FLASH_BASE, b'\x50\x49\x43\x4F' + b'\xFF' * (PAGE_SIZE - 4))
+                return self.guess_flash_size()
+
+        candidates = [
+            8*1024*1024,
+            4*1024*1024,
+            2*1024*1024,
+            1*1024*1024,
+            512*1024,
+            256*1024,
+        ]
+
+        for size in candidates:
+            new_pages = self.flash_read(FLASH_BASE + size, 2 * PAGE_SIZE)
+            if new_pages == pages:
+                continue
+            else:
+                return size * 2
+
+        return candidates[-1]
+
+
+    def get_info(self, info_type: InfoType, param0: int = 0, max_len: int = 32) -> bytes:
+        args = struct.pack("<IIII", info_type, param0, 0, 0)
+        data = self._send_command(CommandID.GET_INFO, args=args, transfer_length=max_len)
+        return data
+
+    @staticmethod
+    def build_diagnostic_partition_info(value: int) -> dict:
+        return {
+            'value': value,
+            'region_searched': bool(value & DiagnosticPartition.REGION_SEARCHED),
+            'invalid_block_loops': bool(value & DiagnosticPartition.INVALID_BLOCK_LOOPS),
+            'valid_block_loops': bool(value & DiagnosticPartition.VALID_BLOCK_LOOPS),
+            'valid_image_defaults': bool(value & DiagnosticPartition.VALID_IMAGE_DEFAULTS),
+            'has_partition_table': bool(value & DiagnosticPartition.HAS_PARTITION_TABLE),
+            'considered': bool(value & DiagnosticPartition.CONSIDERED),
+            'chosen': bool(value & DiagnosticPartition.CHOSEN),
+            'partition_table_matching_key_for_verify': bool(value & DiagnosticPartition.PARTITION_TABLE_MATCHING_KEY_FOR_VERIFY),
+            'partition_table_hash_for_verify': bool(value & DiagnosticPartition.PARTITION_TABLE_HASH_FOR_VERIFY),
+            'partition_table_verified_ok': bool(value & DiagnosticPartition.PARTITION_TABLE_VERIFIED_OK),
+            'image_def_matching_key_for_verify': bool(value & DiagnosticPartition.IMAGE_DEF_MATCHING_KEY_FOR_VERIFY),
+            'image_def_hash_for_verify': bool(value & DiagnosticPartition.IMAGE_DEF_HASH_FOR_VERIFY),
+            'image_def_verified_ok': bool(value & DiagnosticPartition.IMAGE_DEF_VERIFIED_OK),
+            'load_map_entries_loaded': bool(value & DiagnosticPartition.LOAD_MAP_ENTRIES_LOADED),
+            'image_launched': bool(value & DiagnosticPartition.IMAGE_LAUNCHED),
+            'image_condition_failures': bool(value & DiagnosticPartition.IMAGE_CONDITION_FAILURES),
+        }
+
+    def get_info_sys(self, flags: SysInfoFlags = SysInfoFlags.CHIP_INFO | SysInfoFlags.CRITICAL | SysInfoFlags.CPU | SysInfoFlags.FLASH | SysInfoFlags.BOOT_RANDOM | SysInfoFlags.BOOT_INFO) -> dict:
+        data = self.get_info(InfoType.SYS, param0=flags, max_len=256)
+        if len(data) < 24:
+            raise PicoBootError("INFO_SYS response too short")
+
+        offset = 0
+        (count,rflags,) = struct.unpack_from("<II", data, offset)
+        offset += 8
+        ret = {}
+        if (rflags & SysInfoFlags.CHIP_INFO):
+            (chip_info, dev_id_low, dev_id_high) = struct.unpack_from("<III", data, offset)
+            offset += 12
+            ret['chip_info'] = {
+                'package_sel': chip_info,
+                'device_id_low': dev_id_low,
+                'device_id_high': dev_id_high,
+            }
+        if (rflags & SysInfoFlags.CRITICAL):
+            (critical_flags,) = struct.unpack_from("<I", data, offset)
+            offset += 4
+            ret['critical_flags'] = {
+                'value': critical_flags,
+                'secure_boot': bool(critical_flags & CriticalRegister.SECURE_BOOT),
+                'secure_debug_disable': bool(critical_flags & CriticalRegister.SECURE_DEBUG_DISABLE),
+                'debug_disable': bool(critical_flags & CriticalRegister.DEBUG_DISABLE),
+                'default_archsel': bool(critical_flags & CriticalRegister.DEFAULT_ARCHSEL),
+                'glitch_detector_enable': bool(critical_flags & CriticalRegister.GLITCH_DETECTOR_ENABLE),
+                'glitch_detector_sensitivity': (critical_flags & CriticalRegister.GLITCH_DETECTOR_SENS) >> 5,
+                'arm_disable': bool(critical_flags & CriticalRegister.ARM_DISABLE),
+                'riscv_disable': bool(critical_flags & CriticalRegister.RISCV_DISABLE),
+            }
+
+        if (rflags & SysInfoFlags.CPU):
+            (architecture,) = struct.unpack_from("<I", data, offset)
+            offset += 4
+            ret['architecture'] = architecture
+        if (rflags & SysInfoFlags.FLASH):
+            (flash_size, ) = struct.unpack_from("<I", data, offset)
+            offset += 4
+            bits1 = (flash_size & 0xF000) >> 12
+            bits0 = (flash_size & 0x0F00) >> 8
+            print(bits0, bits1)
+            ret['flash_size'] = {
+                'slot0': 4096 << bits0 if bits0 != 0 else 0,
+                'slot1': 4096 << bits1 if bits1 != 0 else 0,
+                'raw': flash_size,
+            }
+        if (rflags & SysInfoFlags.BOOT_RANDOM):
+            (boot_random0, boot_random1, boot_random2, boot_random3) = struct.unpack_from("<IIII", data, offset)
+            offset += 16
+            ret['boot_random'] = (boot_random0, boot_random1, boot_random2, boot_random3)
+        if (rflags & SysInfoFlags.BOOT_INFO):
+            (w0, w1, w2, w3) = struct.unpack_from("<IIII", data, offset)
+            offset += 16
+            d1 = (w1 & 0xFFFF0000) >> 16
+            d0 = (w1 & 0x0000FFFF)
+            ret['boot_info'] = {
+                'tbyb': uint_to_int((w0 & 0xFF000000) >> 24),
+                'recent_boot_partition': PartitionInfoType(uint_to_int((w0 & 0x00FF0000) >> 16)),
+                'boot_type_recent_boot': uint_to_int((w0 & 0x0000FF00) >> 8),
+                'recent_boot_diagnostic_partition': PartitionInfoType(uint_to_int((w0 & 0x000000FF))),
+                'recent_boot_diagnostic': uint_to_int((w1 & 0xFFFFFFFF)),
+                'last_reboot_param0': uint_to_int(w2),
+                'last_reboot_param1': uint_to_int(w3),
+                'diagnostic_slot1': PicoBoot.build_diagnostic_partition_info(d1),
+                'diagnostic_slot0': PicoBoot.build_diagnostic_partition_info(d0),
+            }
+        return ret
