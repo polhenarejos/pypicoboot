@@ -5,8 +5,8 @@ import usb.core
 import usb.util
 import struct
 import itertools
-from picoboot.core.enums import NamedIntEnum
-from picoboot.utils import uint_to_int
+from .utils import uint_to_int
+from .core.enums import NamedIntEnum
 
 # Valors per defecte segons el datasheet (es poden canviar via OTP) :contentReference[oaicite:4]{index=4}
 DEFAULT_VID = 0x2E8A
@@ -21,6 +21,7 @@ CMD_DIR_IN = 0x80
 # IDs de comanda (secció 5.6.4) :contentReference[oaicite:6]{index=6}
 class CommandID(NamedIntEnum):
     EXCLUSIVE_ACCESS = 0x01
+    REBOOT           = 0x02
     FLASH_ERASE      = 0x03
     READ             = 0x84
     WRITE            = 0x05
@@ -293,7 +294,7 @@ class PicoBoot:
         return data_in
 
 
-    def flash_erase(self, addr: int, size: int):
+    def flash_erase(self, addr: int, size: int) -> None:
         if addr % 4096 != 0 or size % 4096 != 0:
             raise ValueError("addr i size must be aligned to 4kB")
         args = struct.pack("<II", addr, size)
@@ -312,10 +313,19 @@ class PicoBoot:
         args = struct.pack("<II", addr, len(data))
         self._send_command(CommandID.WRITE, args=args, data_out=data, transfer_length=len(data))
 
-    def reboot2(self, flags: int = 0, delay_ms: int = 0, p0: int = 0, p1: int = 0) -> int:
+    def reboot1(self, pc: int = 0, sp: int = 0, delay_ms: int = 0) -> None:
+        args = struct.pack("<III", pc, sp, delay_ms)
+        self._send_command(CommandID.REBOOT, args=args, transfer_length=0)
+
+    def reboot2(self, flags: int = 0, delay_ms: int = 0, p0: int = 0, p1: int = 0) -> None:
         args = struct.pack("<IIII", flags, delay_ms, p0, p1)
-        token, _ = self._send_command(CommandID.REBOOT2, args=args, transfer_length=0)
-        return token
+        self._send_command(CommandID.REBOOT2, args=args, transfer_length=0)
+
+    def reboot(self, delay_ms: int = 100) -> None:
+        if (self.model == Model.RP2040):
+            self.reboot1(delay_ms=delay_ms)
+        elif (self.model == Model.RP2350):
+            self.reboot2(delay_ms=delay_ms)
 
     def exit_xip(self) -> None:
         self._send_command(CommandID.EXIT_XIP, transfer_length=0)
@@ -348,7 +358,7 @@ class PicoBoot:
         if pages[:PAGE_SIZE] == pages[PAGE_SIZE:]:
             if (pages[:PAGE_SIZE] == b'\xFF' * PAGE_SIZE):
                 self.flash_write(FLASH_BASE, b'\x50\x49\x43\x4F' + b'\xFF' * (PAGE_SIZE - 4))
-                return self.guess_flash_size()
+                return self._guess_flash_size()
 
         candidates = [
             8*1024*1024,

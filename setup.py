@@ -47,7 +47,7 @@ except(IOError, ImportError):
 
 setup(
     name='pypicoboot',
-    packages=['picoboot','picoboot/tools'],
+    packages=['picoboot','picoboot/core','picoboot/tools'],
     version=version,
     description='Pico Boot for Python',
     license='AGPL',
