@@ -163,17 +163,18 @@ class PicoBoot:
 
     @classmethod
     def open(cls, vid: int = DEFAULT_VID, pid: list[int] = [DEFAULT_PID_RP2040, DEFAULT_PID_RP2350], serial: Optional[str] = None) -> "PicoBoot":
-        class find_pids(object):
+        class find_vidpids(object):
 
-            def __init__(self, pids: list[int]):
+            def __init__(self, vid: int, pids: list[int]):
+                self._vid = vid
                 self._pids = pids
 
             def __call__(self, device: usb.core.Device) -> bool:
-                if device.idProduct in self._pids:
+                if device.idProduct in self._pids and device.idVendor == self._vid:
                     return True
                 return False
 
-        devices = usb.core.find(find_all=True, custom_match=find_pids(pid))
+        devices = usb.core.find(find_all=True, custom_match=find_vidpids(vid, pid))
         devices = list(devices) if devices is not None else []
         if not devices:
             raise PicoBootError("No device found in PICOBOOT mode")
@@ -196,8 +197,8 @@ class PicoBoot:
         # Ensure active configuration
         # macOS does not allow detach_kernel_driver, and often returns Access Denied
         try:
-            if dev.is_kernel_driver_active(0):
-                dev.detach_kernel_driver(0)
+            if dev.is_kernel_driver_active(1):
+                dev.detach_kernel_driver(1)
         except usb.core.USBError:
             # If it fails, we continue anyway. It's normal on macOS.
             pass
@@ -205,7 +206,7 @@ class PicoBoot:
             # Also fine on backends that don't implement the function
             pass
 
-        dev.set_configuration()
+        #dev.set_configuration()
         cfg = dev.get_active_configuration()
 
         intf = None
