@@ -158,7 +158,7 @@ class PicoBoot:
                     if disconnected:
                         self.__device.close()
 
-        self.__observer = PicoBootObserver(self.dev)
+        self.__observer = PicoBootObserver(self)
         self.__monitor = PicoBootMonitor(device=self.dev, cls_callback=self.__observer)
 
     @classmethod
