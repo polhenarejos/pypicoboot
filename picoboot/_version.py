@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 /*
  * This file is part of the pypicoboot distribution (https://github.com/polhenarejos/pypicoboot).
@@ -18,4 +17,4 @@
  */
 """
 
-__version__ = "1.0"
+__version__ = "1.1"
