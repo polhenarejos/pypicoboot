@@ -1,4 +1,22 @@
-# picoboot.py
+"""
+/*
+ * This file is part of the pypicoboot distribution (https://github.com/polhenarejos/pypicoboot).
+ * Copyright (c) 2025 Pol Henarejos.
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published by
+ * the Free Software Foundation, version 3.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+ * Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with this program. If not, see <https://www.gnu.org/licenses/>.
+ */
+"""
+
 from binascii import hexlify
 from typing import Optional
 import usb.core
@@ -7,6 +25,7 @@ import struct
 import itertools
 from .utils import uint_to_int
 from .core.enums import NamedIntEnum
+from .picobootmonitor import PicoBootMonitor, PicoBootMonitorObserver
 
 # Valors per defecte segons el datasheet (es poden canviar via OTP) :contentReference[oaicite:4]{index=4}
 DEFAULT_VID = 0x2E8A
@@ -118,6 +137,7 @@ class PicoBootError(Exception):
 class PicoBoot:
 
     def __init__(self, dev: usb.core.Device, intf, ep_out, ep_in) -> None:
+        print("Initializing PicoBoot device...")
         self.dev = dev
         self.intf = intf
         self.ep_out = ep_out
@@ -126,13 +146,29 @@ class PicoBoot:
         self.interface_reset()
         self._memory = self._guess_flash_size()
         self._model = self._determine_model()
+        class PicoBootObserver(PicoBootMonitorObserver):
+
+                def __init__(self, device: PicoBoot):
+                    self.__device = device
+
+                def update(self, actions: tuple[list[PicoBoot], list[PicoBoot]]) -> None:
+                    (connected, disconnected) = actions
+                    if connected:
+                        pass
+                    if disconnected:
+                        self.__device.close()
+
+        self.__observer = PicoBootObserver(self.dev)
+        self.__monitor = PicoBootMonitor(device=self.dev, cls_callback=self.__observer)
 
     @classmethod
     def open(cls, vid: int = DEFAULT_VID, pid: list[int] = [DEFAULT_PID_RP2040, DEFAULT_PID_RP2350], serial: Optional[str] = None) -> "PicoBoot":
         class find_pids(object):
-            def __init__(self, pids):
+
+            def __init__(self, pids: list[int]):
                 self._pids = pids
-            def __call__(self, device):
+
+            def __call__(self, device: usb.core.Device) -> bool:
                 if device.idProduct in self._pids:
                     return True
                 return False
@@ -193,6 +229,14 @@ class PicoBoot:
             raise PicoBootError("No PICOBOOT BULK_IN/BULK_OUT endpoints found")
 
         return cls(dev, intf, ep_out, ep_in)
+
+    def close(self):
+        if self.dev:
+            usb.util.dispose_resources(self.dev)
+            self.dev = None
+
+    def has_device(self):
+        return self.dev is not None
 
     def interface_reset(self) -> None:
         self.dev.ctrl_transfer(
