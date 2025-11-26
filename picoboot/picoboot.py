@@ -361,7 +361,12 @@ class PicoBoot:
         if transfer_length is None:
             transfer_length = 0 if data_out is None else len(data_out)
 
-        token, header = self._build_command(cmd_id, args=args, transfer_length=transfer_length)
+        logger.debug(f"Preparing to send command {cmd_id} (0x{cmd_id:02X}) with args length {len(args)} and transfer_length {transfer_length}")
+        try:
+            token, header = self._build_command(cmd_id, args=args, transfer_length=transfer_length)
+        except ValueError as e:
+            logger.error(f"Error building command: {e}")
+            raise
         logger.debug(f"Sending command {cmd_id} (0x{cmd_id:02X}) with token {token} (0x{token:08X}) and transfer_length {transfer_length}")
 
         self.ep_out.write(header, timeout=timeout)
