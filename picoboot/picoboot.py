@@ -16,6 +16,31 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 """
+import os
+import logging
+
+def get_logger(name: str):
+    env_level = os.getenv("PICOBOOT_LOG", "CRITICAL").upper()
+
+    valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+    if env_level not in valid_levels:
+        print(f"[logger] Warning: nivell '{env_level}' invàlid. Usant INFO.")
+        env_level = "INFO"
+
+    logger = logging.getLogger(name)
+    logger.setLevel(env_level)
+
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(logging.Formatter(
+            fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        ))
+        logger.addHandler(handler)
+
+    return logger
+
+logger = get_logger("picoboot")
 
 from binascii import hexlify
 from typing import Optional
@@ -137,15 +162,21 @@ class PicoBootError(Exception):
 class PicoBoot:
 
     def __init__(self, dev: usb.core.Device, intf, ep_out, ep_in) -> None:
-        print("Initializing PicoBoot device...")
+        logger.info("Initializing PicoBoot device...")
         self.dev = dev
         self.intf = intf
         self.ep_out = ep_out
         self.ep_in = ep_in
         self._token_counter = itertools.count(1)
+        logger.debug("Resetting interface...")
         self.interface_reset()
+        logger.debug("Guessing flash size...")
         self._memory = self._guess_flash_size()
+        logger.debug(f"Detected flash size: {self._memory // 1024} kB")
+        logger.debug("Determining model...")
         self._model = self._determine_model()
+        logger.debug(f"Detected model: {self._model.name}")
+
         class PicoBootObserver(PicoBootMonitorObserver):
 
                 def __init__(self, device: PicoBoot):
@@ -154,15 +185,21 @@ class PicoBoot:
                 def update(self, actions: tuple[list[PicoBoot], list[PicoBoot]]) -> None:
                     (connected, disconnected) = actions
                     if connected:
+                        logger.debug("PicoBoot device connected")
                         pass
                     if disconnected:
+                        logger.debug("PicoBoot device disconnected")
                         self.__device.close()
 
+        logger.debug("Starting PicoBoot monitor...")
         self.__observer = PicoBootObserver(self)
+        logger.debug("PicoBoot monitor started.")
         self.__monitor = PicoBootMonitor(device=self.dev, cls_callback=self.__observer)
+        logger.debug("PicoBoot device initialized.")
 
     @classmethod
     def open(cls, vid: int = DEFAULT_VID, pid: list[int] = [DEFAULT_PID_RP2040, DEFAULT_PID_RP2350], serial: Optional[str] = None) -> "PicoBoot":
+        logger.info(f"Opening PicoBoot device with VID={vid:04x} and PIDs={[f'{p:04x}' for p in pid]}...")
         class find_vidpids(object):
 
             def __init__(self, vid: int, pids: list[int]):
@@ -177,10 +214,12 @@ class PicoBoot:
         devices = usb.core.find(find_all=True, custom_match=find_vidpids(vid, pid))
         devices = list(devices) if devices is not None else []
         if not devices:
+            logger.error("No device found in PICOBOOT mode")
             raise PicoBootError("No device found in PICOBOOT mode")
 
         dev = None
         if serial is None:
+            logger.info("No serial number provided, using the first device found.")
             dev = devices[0]
         else:
             for d in devices:
@@ -190,15 +229,20 @@ class PicoBoot:
                     continue
                 if s == serial:
                     dev = d
+                    logger.debug(f"Using device with serial number: {serial}")
                     break
         if dev is None:
+            logger.error("No device found with this serial number")
             raise PicoBootError("No device found with this serial number")
 
         # Ensure active configuration
         # macOS does not allow detach_kernel_driver, and often returns Access Denied
         try:
+            logger.debug("Checking if kernel driver is active and detaching if necessary...")
             if dev.is_kernel_driver_active(1):
+                logger.debug("Kernel driver is active, detaching...")
                 dev.detach_kernel_driver(1)
+                logger.debug("Kernel driver detached.")
         except usb.core.USBError:
             # If it fails, we continue anyway. It's normal on macOS.
             pass
@@ -207,7 +251,9 @@ class PicoBoot:
             pass
 
         #dev.set_configuration()
+        logger.debug("Getting active configuration...")
         cfg = dev.get_active_configuration()
+        logger.debug("Searching for PICOBOOT interface...")
 
         intf = None
         for i in cfg:
@@ -215,31 +261,41 @@ class PicoBoot:
                 intf = i
                 break
         if intf is None:
+            logger.error("No interface found with PICOBOOT at the device")
             raise PicoBootError("No interface found with PICOBOOT at the device")
 
         #usb.util.claim_interface(dev, intf.bInterfaceNumber)
 
+        logger.debug("Finding BULK_IN and BULK_OUT endpoints...")
         ep_in = ep_out = None
         for ep in intf.endpoints():
             if usb.util.endpoint_direction(ep.bEndpointAddress) == usb.util.ENDPOINT_IN:
+                logger.debug(f"Found BULK_IN endpoint: 0x{ep.bEndpointAddress:02X}")
                 ep_in = ep
             else:
+                logger.debug(f"Found BULK_OUT endpoint: 0x{ep.bEndpointAddress:02X}")
                 ep_out = ep
 
         if ep_in is None or ep_out is None:
+            logger.error("No PICOBOOT BULK_IN/BULK_OUT endpoints found")
             raise PicoBootError("No PICOBOOT BULK_IN/BULK_OUT endpoints found")
-
+        logger.info("PICOBOOT device opened successfully.")
         return cls(dev, intf, ep_out, ep_in)
 
     def close(self):
+        logger.debug("Closing PicoBoot device...")
         if self.dev:
+            self.__monitor.stop()
+            logger.debug("Releasing USB resources...")
             usb.util.dispose_resources(self.dev)
+            logger.debug("PicoBoot device closed.")
             self.dev = None
 
     def has_device(self):
         return self.dev is not None
 
     def interface_reset(self) -> None:
+        logger.debug("Resetting interface...")
         self.dev.ctrl_transfer(
             ControlRequest.BMREQ_RESET,
             ControlRequest.REQ_INTERFACE_RESET,
@@ -247,8 +303,10 @@ class PicoBoot:
             self.intf.bInterfaceNumber,
             None
         )
+        logger.debug("Interface reset command sent.")
 
     def get_command_status(self) -> dict:
+        logger.debug("Getting command status...")
         data = self.dev.ctrl_transfer(
             ControlRequest.BMREQ_GET_STATUS,
             ControlRequest.REQ_GET_COMMAND_STATUS,
@@ -256,6 +314,7 @@ class PicoBoot:
             self.intf.bInterfaceNumber,
             16,
         )
+        logger.debug(f"Command status data: {hexlify(data).decode()}")
         b = bytes(data)
         dToken, dStatusCode = struct.unpack_from("<II", b, 0)
         bCmdId = b[8]
@@ -303,9 +362,10 @@ class PicoBoot:
             transfer_length = 0 if data_out is None else len(data_out)
 
         token, header = self._build_command(cmd_id, args=args, transfer_length=transfer_length)
-        print(f"Sending command {cmd_id} (0x{cmd_id:02X}) with token {token} (0x{token:08X}) and transfer_length {transfer_length}")
+        logger.debug(f"Sending command {cmd_id} (0x{cmd_id:02X}) with token {token} (0x{token:08X}) and transfer_length {transfer_length}")
 
         self.ep_out.write(header, timeout=timeout)
+        logger.debug(f"Command header sent: {hexlify(header).decode()}")
 
         data_in = b""
 
@@ -322,63 +382,79 @@ class PicoBoot:
                     remaining -= len(chunk)
                 data_in = b"".join(chunks)
                 if len(data_in) != transfer_length:
+                    logger.error(f"Expected {transfer_length} bytes, got {len(data_in)}")
                     raise PicoBootError(f"Expected {transfer_length} bytes, got {len(data_in)}")
             else:
                 if data_out is None or len(data_out) < transfer_length:
+                    logger.error("data_out missing or too short for OUT command")
                     raise ValueError("data_out missing or too short for OUT command")
                 self.ep_out.write(data_out[:transfer_length], timeout=timeout)
 
         try:
+            logger.debug("Waiting for ACK...")
             if is_in:
                 self.ep_out.write(b"", timeout=timeout)
             else:
                 ack = self.ep_in.read(1, timeout=timeout)
         except usb.core.USBError:
+            logger.error("No ACK received after command")
             raise PicoBootError("No ACK received after command")
 
         return data_in
 
 
     def flash_erase(self, addr: int, size: int) -> None:
+        logger.debug(f"Erasing flash at address 0x{addr:08X} with size {size} bytes")
         if addr % 4096 != 0 or size % 4096 != 0:
+            logger.error("addr i size must be aligned to 4kB")
             raise ValueError("addr i size must be aligned to 4kB")
         args = struct.pack("<II", addr, size)
         self._send_command(CommandID.FLASH_ERASE, args=args, transfer_length=0)
 
     def flash_read(self, addr: int, size: int) -> bytes:
+        logger.debug(f"Reading flash at address 0x{addr:08X} with size {size} bytes")
         args = struct.pack("<II", addr, size)
         data = self._send_command(CommandID.READ, args=args, transfer_length=size)
         if len(data) != size:
+            logger.error(f"READ returned {len(data)} bytes, expected {size}")
             raise PicoBootError(f"READ returned {len(data)} bytes, expected {size}")
         return data
 
     def flash_write(self, addr: int, data: bytes) -> None:
+        logger.debug(f"Writing flash at address 0x{addr:08X} with size {len(data)} bytes")
         if addr % 256 != 0 or len(data) % 256 != 0:
+            logger.error("addr i len(data) must be aligned/multiple of 256 bytes")
             raise ValueError("addr i len(data) must be aligned/multiple of 256 bytes")
         args = struct.pack("<II", addr, len(data))
         self._send_command(CommandID.WRITE, args=args, data_out=data, transfer_length=len(data))
 
     def reboot1(self, pc: int = 0, sp: int = 0, delay_ms: int = 0) -> None:
+        logger.debug(f"Rebooting device (REBOOT1) with pc=0x{pc:08X}, sp=0x{sp:08X}, delay_ms={delay_ms}")
         args = struct.pack("<III", pc, sp, delay_ms)
         self._send_command(CommandID.REBOOT, args=args, transfer_length=0)
 
     def reboot2(self, flags: int = 0, delay_ms: int = 0, p0: int = 0, p1: int = 0) -> None:
+        logger.debug(f"Rebooting device (REBOOT2) with flags=0x{flags:08X}, delay_ms={delay_ms}, p0=0x{p0:08X}, p1=0x{p1:08X}")
         args = struct.pack("<IIII", flags, delay_ms, p0, p1)
         self._send_command(CommandID.REBOOT2, args=args, transfer_length=0)
 
     def reboot(self, delay_ms: int = 100) -> None:
+        logger.debug(f"Rebooting device with delay_ms={delay_ms}")
         if (self.model == Model.RP2040):
             self.reboot1(delay_ms=delay_ms)
         elif (self.model == Model.RP2350):
             self.reboot2(delay_ms=delay_ms)
 
     def exit_xip(self) -> None:
+        logger.debug("Exiting XIP mode...")
         self._send_command(CommandID.EXIT_XIP, transfer_length=0)
 
     def exclusive_access(self) -> None:
+        logger.debug("Requesting exclusive access to flash...")
         self._send_command(CommandID.EXCLUSIVE_ACCESS, args=struct.pack("<B", 1), transfer_length=0)
 
     def _determine_model(self) -> str:
+        logger.debug("Determining device model...")
         if (hasattr(self, "_model")) and (self._model is not None):
             return self._model
         data = self.flash_read(Addresses.BOOTROM_MAGIC, 4)
@@ -390,6 +466,7 @@ class PicoBoot:
         return self._model
 
     def _guess_flash_size(self) -> int:
+        logger.debug("Guessing flash size...")
         if (hasattr(self, "_memory")) and (self._memory is not None):
             return self._memory
         FLASH_BASE = 0x10000000
@@ -428,6 +505,7 @@ class PicoBoot:
         return self._memory
 
     def get_info(self, info_type: InfoType, param0: int = 0, max_len: int = 32) -> bytes:
+        logger.debug(f"Getting info of type {info_type} with param0={param0} and max_len={max_len}")
         args = struct.pack("<IIII", info_type, param0, 0, 0)
         data = self._send_command(CommandID.GET_INFO, args=args, transfer_length=max_len)
         return data
@@ -455,6 +533,7 @@ class PicoBoot:
         }
 
     def get_info_sys(self, flags: SysInfoFlags = SysInfoFlags.CHIP_INFO | SysInfoFlags.CRITICAL | SysInfoFlags.CPU | SysInfoFlags.FLASH | SysInfoFlags.BOOT_RANDOM | SysInfoFlags.BOOT_INFO) -> dict:
+        logger.debug(f"Getting system info with flags: {flags}")
         data = self.get_info(InfoType.SYS, param0=flags, max_len=256)
         if len(data) < 24:
             raise PicoBootError("INFO_SYS response too short")
