@@ -55,8 +55,8 @@ class PicoBootMonitor:
 
     def stop(self):
         self._running = False
-        if self._thread:
-            self._thread.join()
+        #if self._thread:
+        #    self._thread.join()
 
     def _run(self):
         while self._running:
