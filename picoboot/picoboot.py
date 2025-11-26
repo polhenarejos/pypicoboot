@@ -16,31 +16,6 @@
  * along with this program. If not, see <https://www.gnu.org/licenses/>.
  */
 """
-import os
-import logging
-
-def get_logger(name: str):
-    env_level = os.getenv("PICOBOOT_LOG", "CRITICAL").upper()
-
-    valid_levels = ["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
-    if env_level not in valid_levels:
-        print(f"[logger] Warning: nivell '{env_level}' invàlid. Usant INFO.")
-        env_level = "INFO"
-
-    logger = logging.getLogger(name)
-    logger.setLevel(env_level)
-
-    if not logger.handlers:
-        handler = logging.StreamHandler()
-        handler.setFormatter(logging.Formatter(
-            fmt="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-            datefmt="%Y-%m-%d %H:%M:%S"
-        ))
-        logger.addHandler(handler)
-
-    return logger
-
-logger = get_logger("picoboot")
 
 from binascii import hexlify
 from typing import Optional
@@ -51,6 +26,9 @@ import itertools
 from .utils import uint_to_int
 from .core.enums import NamedIntEnum
 from .picobootmonitor import PicoBootMonitor, PicoBootMonitorObserver
+from .core.log import get_logger
+
+logger = get_logger("PicoBoot")
 
 # Valors per defecte segons el datasheet (es poden canviar via OTP) :contentReference[oaicite:4]{index=4}
 DEFAULT_VID = 0x2E8A
@@ -369,6 +347,7 @@ class PicoBoot:
             raise
         logger.debug(f"Sending command {cmd_id} (0x{cmd_id:02X}) with token {token} (0x{token:08X}) and transfer_length {transfer_length}")
 
+        logger.trace(f"Command header: {hexlify(header).decode()}")
         self.ep_out.write(header, timeout=timeout)
         logger.debug(f"Command header sent: {hexlify(header).decode()}")
 
@@ -386,6 +365,7 @@ class PicoBoot:
                     chunks.append(chunk)
                     remaining -= len(chunk)
                 data_in = b"".join(chunks)
+                logger.trace(f"Received data_in: {hexlify(data_in).decode()}")
                 if len(data_in) != transfer_length:
                     logger.error(f"Expected {transfer_length} bytes, got {len(data_in)}")
                     raise PicoBootError(f"Expected {transfer_length} bytes, got {len(data_in)}")
@@ -393,6 +373,7 @@ class PicoBoot:
                 if data_out is None or len(data_out) < transfer_length:
                     logger.error("data_out missing or too short for OUT command")
                     raise ValueError("data_out missing or too short for OUT command")
+                logger.trace(f"Sending data_out: {hexlify(data_out[:transfer_length]).decode()}")
                 self.ep_out.write(data_out[:transfer_length], timeout=timeout)
 
         try:
@@ -404,6 +385,7 @@ class PicoBoot:
         except usb.core.USBError:
             logger.error("No ACK received after command")
             raise PicoBootError("No ACK received after command")
+        logger.debug("ACK received.")
 
         return data_in
 
