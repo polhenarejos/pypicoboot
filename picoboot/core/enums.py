@@ -24,6 +24,11 @@ class NamedIntEnum(enum.IntEnum):
     def __str__(self):
         return self.name
 
+    def __format__(self, fmt):
+        if any(c in fmt for c in "xXod"):
+            return format(self.value, fmt)
+        return self.name
+
     @classmethod
     def from_string(cls, value: Union[str, int]) -> "NamedIntEnum":
         if not value:
