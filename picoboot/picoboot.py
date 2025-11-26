@@ -27,6 +27,7 @@ from .utils import uint_to_int
 from .core.enums import NamedIntEnum
 from .picobootmonitor import PicoBootMonitor, PicoBootMonitorObserver
 from .core.log import get_logger
+from .core.exceptions import PicoBootError, PicoBootNotFoundError, PicoBootInvalidStateError
 
 logger = get_logger("PicoBoot")
 
@@ -134,9 +135,6 @@ class Model(NamedIntEnum):
 class Addresses(NamedIntEnum):
     BOOTROM_MAGIC = 0x00000010
 
-class PicoBootError(Exception):
-    pass
-
 class PicoBoot:
 
     def __init__(self, dev: usb.core.Device, intf, ep_out, ep_in) -> None:
@@ -193,7 +191,7 @@ class PicoBoot:
         devices = list(devices) if devices is not None else []
         if not devices:
             logger.error("No device found in PICOBOOT mode")
-            raise PicoBootError("No device found in PICOBOOT mode")
+            raise PicoBootNotFoundError("No device found in PICOBOOT mode")
 
         dev = None
         if serial is None:
@@ -211,7 +209,7 @@ class PicoBoot:
                     break
         if dev is None:
             logger.error("No device found with this serial number")
-            raise PicoBootError("No device found with this serial number")
+            raise PicoBootNotFoundError("No device found with this serial number")
 
         # Ensure active configuration
         # macOS does not allow detach_kernel_driver, and often returns Access Denied
@@ -240,7 +238,7 @@ class PicoBoot:
                 break
         if intf is None:
             logger.error("No interface found with PICOBOOT at the device")
-            raise PicoBootError("No interface found with PICOBOOT at the device")
+            raise PicoBootNotFoundError("No interface found with PICOBOOT at the device")
 
         #usb.util.claim_interface(dev, intf.bInterfaceNumber)
 
@@ -256,7 +254,7 @@ class PicoBoot:
 
         if ep_in is None or ep_out is None:
             logger.error("No PICOBOOT BULK_IN/BULK_OUT endpoints found")
-            raise PicoBootError("No PICOBOOT BULK_IN/BULK_OUT endpoints found")
+            raise PicoBootNotFoundError("No PICOBOOT BULK_IN/BULK_OUT endpoints found")
         logger.info("PICOBOOT device opened successfully.")
         return cls(dev, intf, ep_out, ep_in)
 
@@ -348,7 +346,11 @@ class PicoBoot:
         logger.debug(f"Sending command {cmd_id} (0x{cmd_id:02X}) with token {token} (0x{token:08X}) and transfer_length {transfer_length}")
 
         logger.trace(f"Command header: {hexlify(header).decode()}")
-        self.ep_out.write(header, timeout=timeout)
+        try:
+            self.ep_out.write(header, timeout=timeout)
+        except usb.core.USBError as e:
+            logger.error(f"Failed to send command header: {e}")
+            raise PicoBootInvalidStateError("Failed to send command header: " + str(e))
         logger.debug(f"Command header sent: {hexlify(header).decode()}")
 
         data_in = b""
@@ -359,7 +361,11 @@ class PicoBoot:
                 chunks = []
                 maxpkt = self.ep_in.wMaxPacketSize
                 while remaining > 0:
-                    chunk = bytes(self.ep_in.read(min(maxpkt, remaining), timeout=timeout))
+                    try:
+                        chunk = bytes(self.ep_in.read(min(maxpkt, remaining), timeout=timeout))
+                    except usb.core.USBError as e:
+                        logger.error(f"Failed to read data_in: {e}")
+                        raise PicoBootInvalidStateError("Failed to read data_in: " + str(e))
                     if not chunk:
                         break
                     chunks.append(chunk)
@@ -374,7 +380,11 @@ class PicoBoot:
                     logger.error("data_out missing or too short for OUT command")
                     raise ValueError("data_out missing or too short for OUT command")
                 logger.trace(f"Sending data_out: {hexlify(data_out[:transfer_length]).decode()}")
-                self.ep_out.write(data_out[:transfer_length], timeout=timeout)
+                try:
+                    self.ep_out.write(data_out[:transfer_length], timeout=timeout)
+                except usb.core.USBError as e:
+                    logger.error(f"Failed to send data_out: {e}")
+                    raise PicoBootInvalidStateError("Failed to send data_out: " + str(e))
 
         try:
             logger.debug("Waiting for ACK...")
