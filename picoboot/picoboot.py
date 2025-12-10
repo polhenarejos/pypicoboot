@@ -270,6 +270,11 @@ class PicoBoot:
     def has_device(self):
         return self.dev is not None
 
+    @property
+    def serial_number(self) -> int:
+        s = usb.util.get_string(self.dev, self.dev.iSerialNumber)
+        return int(s, 16)
+
     def interface_reset(self) -> None:
         logger.debug("Resetting interface...")
         self.dev.ctrl_transfer(
