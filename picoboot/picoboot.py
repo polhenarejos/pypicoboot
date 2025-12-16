@@ -127,7 +127,7 @@ class PartitionInfoType(NamedIntEnum):
     SLOT_1            = -3
     IMAGE            = -4
 
-class Model(NamedIntEnum):
+class Platform(NamedIntEnum):
     RP2040  = 0x01754d
     RP2350  = 0x02754d
     UNKNOWN = 0x000000
@@ -149,9 +149,9 @@ class PicoBoot:
         logger.debug("Guessing flash size...")
         self._memory = self._guess_flash_size()
         logger.debug(f"Detected flash size: {self._memory // 1024} kB")
-        logger.debug("Determining model...")
-        self._model = self._determine_model()
-        logger.debug(f"Detected model: {self._model.name}")
+        logger.debug("Determining platform...")
+        self._platform = self._determine_platform()
+        logger.debug(f"Detected platform: {self._platform.name}")
 
         class PicoBootObserver(PicoBootMonitorObserver):
 
@@ -274,6 +274,11 @@ class PicoBoot:
     def serial_number(self) -> int:
         s = usb.util.get_string(self.dev, self.dev.iSerialNumber)
         return int(s, 16)
+
+    @property
+    def serial_number_str(self) -> str:
+        s = usb.util.get_string(self.dev, self.dev.iSerialNumber)
+        return s
 
     def interface_reset(self) -> None:
         logger.debug("Resetting interface...")
@@ -442,9 +447,9 @@ class PicoBoot:
 
     def reboot(self, delay_ms: int = 100) -> None:
         logger.debug(f"Rebooting device with delay_ms={delay_ms}")
-        if (self.model == Model.RP2040):
+        if (self.platform == Platform.RP2040):
             self.reboot1(delay_ms=delay_ms)
-        elif (self.model == Model.RP2350):
+        elif (self.platform == Platform.RP2350):
             self.reboot2(delay_ms=delay_ms)
 
     def exit_xip(self) -> None:
@@ -455,17 +460,17 @@ class PicoBoot:
         logger.debug("Requesting exclusive access to flash...")
         self._send_command(CommandID.EXCLUSIVE_ACCESS, args=struct.pack("<B", 1), transfer_length=0)
 
-    def _determine_model(self) -> str:
-        logger.debug("Determining device model...")
-        if (hasattr(self, "_model")) and (self._model is not None):
-            return self._model
+    def _determine_platform(self) -> str:
+        logger.debug("Determining device platform...")
+        if (hasattr(self, "_platform")) and (self._platform is not None):
+            return self._platform
         data = self.flash_read(Addresses.BOOTROM_MAGIC, 4)
         (magic,) = struct.unpack("<I", data)
-        return Model(magic & 0xf0ffffff)
+        return Platform(magic & 0xf0ffffff)
 
     @property
-    def model(self) -> str:
-        return self._model
+    def platform(self) -> str:
+        return self._platform
 
     def _guess_flash_size(self) -> int:
         logger.debug("Guessing flash size...")
