@@ -174,7 +174,7 @@ class PicoBoot:
         logger.debug("PicoBoot device initialized.")
 
     @classmethod
-    def open(cls, vid: int = DEFAULT_VID, pid: list[int] = [DEFAULT_PID_RP2040, DEFAULT_PID_RP2350], serial: Optional[str] = None) -> "PicoBoot":
+    def open(cls, vid: int = DEFAULT_VID, pid: list[int] = [DEFAULT_PID_RP2040, DEFAULT_PID_RP2350], serial: Optional[str] = None, slot = -1) -> "PicoBoot":
         logger.info(f"Opening PicoBoot device with VID={vid:04x} and PIDs={[f'{p:04x}' for p in pid]}...")
         class find_vidpids(object):
 
@@ -192,6 +192,13 @@ class PicoBoot:
         if not devices:
             logger.error("No device found in PICOBOOT mode")
             raise PicoBootNotFoundError("No device found in PICOBOOT mode")
+
+        if slot >= 0:
+            logger.info(f"Looking for device in slot {slot}...")
+            if (slot >= len(devices)):
+                logger.error("No device found in the specified slot")
+                raise PicoBootNotFoundError("No device found in the specified slot")
+            devices = [devices[slot]] if slot < len(devices) else []
 
         dev = None
         if serial is None:
@@ -277,7 +284,10 @@ class PicoBoot:
 
     @property
     def serial_number_str(self) -> str:
-        s = usb.util.get_string(self.dev, self.dev.iSerialNumber)
+        try:
+            s = usb.util.get_string(self.dev, self.dev.iSerialNumber)
+        except Exception:
+            s = "unknown"
         return s
 
     def interface_reset(self) -> None:
