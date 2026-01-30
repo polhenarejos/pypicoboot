@@ -23,3 +23,17 @@ def uint_to_int(value: int, bits: int = 8) -> int:
     value &= mask                     # ensure value fits in `bits`
     sign_bit = 1 << (bits - 1)
     return value - (1 << bits) if (value & sign_bit) else value
+
+def crc32_ieee(data: bytes) -> int:
+    crc = 0xFFFFFFFF
+
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            if crc & 1:
+                crc = (crc >> 1) ^ 0xEDB88320
+            else:
+                crc >>= 1
+
+    return crc ^ 0xFFFFFFFF
+

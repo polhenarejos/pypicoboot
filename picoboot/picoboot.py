@@ -23,7 +23,7 @@ import usb.core
 import usb.util
 import struct
 import itertools
-from .utils import uint_to_int
+from .utils import uint_to_int, crc32_ieee
 from .core.enums import NamedIntEnum
 from .picobootmonitor import PicoBootMonitor, PicoBootMonitorObserver
 from .core.log import get_logger
@@ -134,6 +134,7 @@ class Platform(NamedIntEnum):
 
 class Addresses(NamedIntEnum):
     BOOTROM_MAGIC = 0x00000010
+    PHYMARKER     = 0x10100000
 
 class PicoBoot:
 
@@ -278,17 +279,28 @@ class PicoBoot:
         return self.dev is not None
 
     @property
-    def serial_number(self) -> int:
-        s = usb.util.get_string(self.dev, self.dev.iSerialNumber)
-        return int(s, 16)
-
-    @property
     def serial_number_str(self) -> str:
         try:
-            s = usb.util.get_string(self.dev, self.dev.iSerialNumber)
+            s = None
+            if self.platform == Platform.RP2040:
+                r = self.flash_read(Addresses.PHYMARKER, 24)
+                magic = struct.unpack_from("<Q", r, 0)[0]
+                if (magic == 0x5049434F4B455953):  # "PICOKEYS"
+                    crc32 = crc32_ieee(r[0:20])
+                    if crc32 == struct.unpack_from("<I", r, 20)[0]:
+                        s = hexlify(r[12:20]).decode().upper()
+            if not s:
+                s = usb.util.get_string(self.dev, self.dev.iSerialNumber)
         except Exception:
             s = "unknown"
         return s
+
+    @property
+    def serial_number(self) -> int:
+        if self.dev is None:
+            raise PicoBootInvalidStateError("Device not connected")
+        s = self.serial_number_str
+        return int(s, 16)
 
     def interface_reset(self) -> None:
         logger.debug("Resetting interface...")
