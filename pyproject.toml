@@ -16,6 +16,8 @@ authors = [
 dependencies = [
     "setuptools",
     "pyusb",
+    "esptool",
+    "pyserial",
 ]
 
 classifiers = [
@@ -45,4 +47,3 @@ include-package-data = true
 [tool.setuptools.dynamic]
 version = { attr = "picoboot._version.__version__" }
 readme = { file = "README.md" }
-

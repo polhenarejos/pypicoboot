@@ -28,6 +28,7 @@ from .core.enums import NamedIntEnum
 from .picobootmonitor import PicoBootMonitor, PicoBootMonitorObserver
 from .core.log import get_logger
 from .core.exceptions import PicoBootError, PicoBootNotFoundError, PicoBootInvalidStateError
+from .platform import Platform
 
 logger = get_logger("PicoBoot")
 
@@ -126,11 +127,6 @@ class PartitionInfoType(NamedIntEnum):
     SLOT_0            = -2
     SLOT_1            = -3
     IMAGE            = -4
-
-class Platform(NamedIntEnum):
-    RP2040  = 0x01754d
-    RP2350  = 0x02754d
-    UNKNOWN = 0x000000
 
 class Addresses(NamedIntEnum):
     BOOTROM_MAGIC = 0x00000010

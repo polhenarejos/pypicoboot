@@ -26,3 +26,13 @@ class PicoBootNotFoundError(PicoBootError):
 
 class PicoBootInvalidStateError(PicoBootError):
     pass
+
+
+class EspBootError(Exception):
+    pass
+
+class EspBootNotFoundError(EspBootError):
+    pass
+
+class EspBootInvalidStateError(EspBootError):
+    pass
