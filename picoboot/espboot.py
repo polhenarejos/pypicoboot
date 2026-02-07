@@ -191,6 +191,9 @@ class EspBoot:
     def platform(self) -> Platform:
         return self._determine_platform()
 
+    def set_serial_number_str(self, serial: str) -> None:
+        self._cached_serial_number = bytes.fromhex(serial[:12])[::-1]
+
     @property
     def serial_number_str(self) -> str:
         if self._esp is None:
@@ -202,7 +205,10 @@ class EspBoot:
             except Exception:
                 mac = None
         if mac is None:
-            raise EspBootError("Unable to read MAC address")
+            if hasattr(self, "_cached_serial_number"):
+                mac = self._cached_serial_number
+            else:
+                mac = b"\x00" * 6
         if isinstance(mac, int):
             mac = mac.to_bytes(6, "big")
         if isinstance(mac, (bytes, bytearray)):
@@ -275,7 +281,7 @@ class EspBoot:
         try:
             return self.get_flash_size()
         except EspBootError:
-            return None
+            return 0
 
     @staticmethod
     def _flash_size_to_bytes(size):
@@ -321,10 +327,23 @@ class EspBoot:
                 except Exception:
                     pass
 
+    def write_flash(self, addr: int, data: bytes) -> None:
+        if self._esp is None:
+            raise EspBootError("Device not connected")
+        write_flash(self._esp, [(addr, data)])
+
     def reset(self, mode: str = "hard-reset") -> None:
         if self._esp is None:
             raise EspBootError("Device not connected")
         try:
             reset_chip(self._esp, mode)
+        except Exception:
+            pass
+
+    def reboot(self, bootsel: bool = False) -> None:
+        if self._esp is None:
+            raise EspBootError("Device not connected")
+        try:
+            reset_chip(self._esp, "reset" if bootsel else "hard-reset")
         except Exception:
             pass
