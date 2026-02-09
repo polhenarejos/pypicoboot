@@ -20,7 +20,8 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
-from enum import Enum
+import os
+import threading
 from typing import Iterable, Optional
 
 from esptool.cmds import attach_flash, detect_chip, flash_id, reset_chip, run_stub, write_flash
@@ -33,6 +34,8 @@ from .platform import Platform
 logger = get_logger("EspBoot")
 
 DEFAULT_CONNECT_ATTEMPTS = 1
+DEFAULT_DETECT_TIMEOUT_S = float(os.getenv("ESPBOOT_DETECT_TIMEOUT_S", "2.5"))
+ESPBOOT_SCAN_ALL_PORTS = os.getenv("ESPBOOT_SCAN_ALL_PORTS", "FALSE").upper() == "TRUE"
 ESP_SERIAL_VIDS = {
     0x303A,  # Espressif
     0x10C4,  # Silicon Labs CP210x
@@ -50,14 +53,14 @@ class EspBoot:
         self._stack = stack
 
     @staticmethod
-    def _list_serial_ports() -> list[str]:
+    def _list_serial_ports() -> tuple[list[str], list[str]]:
         try:
             from serial.tools import list_ports
         except Exception as e:  # pragma: no cover
             raise EspBootError("pyserial is required for auto port detection") from e
         ports = list(list_ports.comports())
         if not ports:
-            return []
+            return [], []
         preferred = []
         others = []
         for p in ports:
@@ -71,16 +74,48 @@ class EspBoot:
                 preferred.append(p.device)
             else:
                 others.append(p.device)
-        return preferred + others
+        return preferred, others
+
+    @classmethod
+    def _detect_chip_with_timeout(cls, port: str, stack: ExitStack, timeout_s: float) -> tuple[object, object] | tuple[None, None]:
+        result = {}
+
+        def worker():
+            try:
+                ctx = detect_chip(port, connect_attempts=DEFAULT_CONNECT_ATTEMPTS)
+                esp = ctx.__enter__()
+                result["ctx"] = ctx
+                result["esp"] = esp
+            except Exception as e:
+                result["err"] = e
+
+        t = threading.Thread(target=worker, daemon=True)
+        t.start()
+        t.join(timeout_s)
+        if t.is_alive():
+            logger.debug(f"Timeout while detecting ESP32 on port {port}")
+            return None, None
+        if "err" in result:
+            raise result["err"]
+        ctx = result.get("ctx")
+        esp = result.get("esp")
+        if ctx is None or esp is None:
+            return None, None
+        # Ensure context is closed by the ExitStack; we already entered it in worker.
+        stack.callback(ctx.__exit__, None, None, None)
+        return ctx, esp
 
     @classmethod
     def _auto_detect_port(cls, stack: ExitStack):
-        ports = cls._list_serial_ports()
+        preferred, others = cls._list_serial_ports()
+        ports = preferred + others if ESPBOOT_SCAN_ALL_PORTS else preferred
         if not ports:
             raise EspBootNotFoundError("No serial ports found for ESP32 detection")
         for port in ports:
             try:
-                esp = stack.enter_context(detect_chip(port, connect_attempts=DEFAULT_CONNECT_ATTEMPTS))
+                _, esp = cls._detect_chip_with_timeout(port, stack, DEFAULT_DETECT_TIMEOUT_S)
+                if esp is None:
+                    continue
                 logger.debug(f"ESP32 detected on port {port}")
                 return port, esp
             except Exception:
@@ -90,10 +125,10 @@ class EspBoot:
     @classmethod
     def _is_port_present(cls, port: str) -> bool:
         try:
-            ports = cls._list_serial_ports()
+            preferred, others = cls._list_serial_ports()
         except EspBootError:
             return False
-        return port in ports
+        return port in preferred or port in others
 
     @classmethod
     def open(cls, port: Optional[str] = None, run_stub_flasher: bool = True) -> "EspBoot":
@@ -107,7 +142,9 @@ class EspBoot:
             if port is None or port == "auto":
                 port, esp = cls._auto_detect_port(stack)
             else:
-                esp = stack.enter_context(detect_chip(port, connect_attempts=DEFAULT_CONNECT_ATTEMPTS))
+                _, esp = cls._detect_chip_with_timeout(port, stack, DEFAULT_DETECT_TIMEOUT_S)
+                if esp is None:
+                    raise EspBootError(f"Timeout while detecting ESP32 on port {port}")
             if run_stub_flasher:
                 esp = run_stub(esp)
             attach_flash(esp)
